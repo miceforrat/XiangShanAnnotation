@@ -37,11 +37,16 @@ class FrontendTopDownBundle(implicit p: Parameters) extends XSBundle {
 class FetchRequestBundle(implicit p: Parameters) extends XSBundle with HasICacheParameters {
 
   //fast path: Timing critical
+  // 预测块的起始地址
   val startAddr       = UInt(VAddrBits.W)
+  // 起始地址所在cacheline的下一个cacheline的开始地址
   val nextlineStart   = UInt(VAddrBits.W)
+  // 下一个预测块的起始地址
   val nextStartAddr   = UInt(VAddrBits.W)
   //slow path
+  //ftq中的队列指针
   val ftqIdx          = new FtqPtr
+  // 有无控制流指令和控制流指令的位置？
   val ftqOffset       = ValidUndirectioned(UInt(log2Ceil(PredictWidth).W))
 
   val topdown_info    = new FrontendTopDownBundle

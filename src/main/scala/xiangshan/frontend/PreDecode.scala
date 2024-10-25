@@ -295,8 +295,8 @@ class RVCExpander(implicit p: Parameters) extends XSModule {
 
 object FaultType {
   def noFault         = "b000".U
-  def jalFault        = "b001".U    //not CFI taken or invalid instruction taken
-  def retFault        = "b010".U    //not CFI taken or invalid instruction taken
+  def jalFault        = "b001".U    //not CFI taken or invalid instruction taken；预测块范围内有jal，但是没有预测跳转
+  def retFault        = "b010".U    //not CFI taken or invalid instruction taken；预测块内有ret，但是没有预测跳转
   def targetFault     = "b011".U
   def notCFIFault    = "b100".U    //not CFI taken or invalid instruction taken
   def invalidTaken    = "b101".U

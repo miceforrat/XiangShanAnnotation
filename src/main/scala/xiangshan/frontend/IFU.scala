@@ -241,6 +241,15 @@ class NewIFU(implicit p: Parameters) extends XSModule
     */
 
   val f0_valid                             = fromFtq.req.valid
+  /**
+   * 包括预测块起始地址 - startAddr
+   * 起始地址所在cache line的下一个cache line开始地址 - nextlineStart
+   * 下一个预测块的起始地址 -
+   * 该预测块在FTQ里的队列指针 -
+   * 该预测块有无taken的CFI指令
+   * 该taken的CFI指令在预测块里的位置
+   * 请求控制信号（请求是否有效和IFU是否ready）
+   */
   val f0_ftq_req                           = fromFtq.req.bits
   val f0_doubleLine                        = fromFtq.req.bits.crossCacheline
   val f0_vSetIdx                           = VecInit(get_idx((f0_ftq_req.startAddr)), get_idx(f0_ftq_req.nextlineStart))
@@ -319,8 +328,10 @@ class NewIFU(implicit p: Parameters) extends XSModule
    * val f1_pc                 = VecInit(f1_pc_lower_result.map{ i =>
    *  Mux(i(f1_pc_adder_cut_point), Cat(f1_pc_high_plus1,i(f1_pc_adder_cut_point-1,0)), Cat(f1_pc_high,i(f1_pc_adder_cut_point-1,0)))})
    */
+
   val f1_pc_lower_result    = VecInit((0 until PredictWidth).map(i => Cat(0.U(1.W), f1_ftq_req.startAddr(PcCutPoint-1, 0)) + (i * 2).U)) // cat with overflow bit
 
+//  计算PC，根据f1_pc_lower_result(PcCutPoint)选择拼接方式
   val f1_pc                 = CatPC(f1_pc_lower_result, f1_pc_high, f1_pc_high_plus1)
 
   val f1_half_snpc_lower_result = VecInit((0 until PredictWidth).map(i => Cat(0.U(1.W), f1_ftq_req.startAddr(PcCutPoint-1, 0)) + ((i+2) * 2).U)) // cat with overflow bit
@@ -334,6 +345,11 @@ class NewIFU(implicit p: Parameters) extends XSModule
     XSError(f1_half_snpc.zip(f1_half_snpc_diff).map{ case (a,b) => a.asUInt =/= b.asUInt }.reduce(_||_),  "f1_half_snpc adder cut fail")
   }
 
+  /**
+   * 切分“指针”生成
+   * 如果有C扩展，生成以 00_f1ftqreq[blockOffBits-1, 1] + i 填充的向量（17个数字，此时PredictWidth为16）
+   * 否则，生成以 00_f1ftqreq[blockOffBits-1, 2] + i 填充的向量
+   */
   val f1_cut_ptr            = if(HasCExtension)  VecInit((0 until PredictWidth + 1).map(i =>  Cat(0.U(2.W), f1_ftq_req.startAddr(blockOffBits-1, 1)) + i.U ))
                                   else           VecInit((0 until PredictWidth).map(i =>     Cat(0.U(2.W), f1_ftq_req.startAddr(blockOffBits-1, 2)) + i.U ))
 
@@ -343,7 +359,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
     * - icache response data (latched for pipeline stop)
     * - generate exceprion bits for every instruciton (page fault/access fault/mmio)
     * - generate predicted instruction range (1 means this instruciton is in this fetch packet)
-    * - cut data from cachlines to packet instruction code
+    * - cut data from cachelines to packet instruction code
     * - instruction predecode and RVC expand
     ******************************************************************************
     */
@@ -359,6 +375,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
 
   f2_ready := f2_fire || !f2_valid
   //TODO: addr compare may be timing critical
+//  下面这一行是验证ICache的指令码和本流水级的指令码是否等同
   val f2_icache_all_resp_wire       =  fromICache(0).valid && (fromICache(0).bits.vaddr ===  f2_ftq_req.startAddr) && ((fromICache(1).valid && (fromICache(1).bits.vaddr ===  f2_ftq_req.nextlineStart)) || !f2_doubleLine)
   val f2_icache_all_resp_reg        = RegInit(false.B)
 
@@ -377,6 +394,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   .elsewhen(f1_fire && !f1_flush) {f2_valid := true.B }
   .elsewhen(f2_fire)              {f2_valid := false.B}
 
+  //产生额外异常信息
   val f2_exception    = VecInit((0 until PortNumber).map(i => fromICache(i).bits.exception))
   val f2_except_fromBackend = fromICache(0).bits.exceptionFromBackend
   // paddr and gpaddr of [startAddr, nextLineAddr]
@@ -415,7 +433,9 @@ class NewIFU(implicit p: Parameters) extends XSModule
   }
 
   val f2_foldpc = VecInit(f2_pc.map(i => XORFold(i(VAddrBits-1,1), MemPredPCWidth)))
+  // 跳转指令有效范围
   val f2_jump_range = Fill(PredictWidth, !f2_ftq_req.ftqOffset.valid) | Fill(PredictWidth, 1.U(1.W)) >> ~f2_ftq_req.ftqOffset.bits
+  //无跳转时指令有效范围
   val f2_ftr_range  = Fill(PredictWidth,  f2_ftq_req.ftqOffset.valid) | Fill(PredictWidth, 1.U(1.W)) >> ~getBasicBlockIdx(f2_ftq_req.nextStartAddr, f2_ftq_req.startAddr)
   val f2_instr_range = f2_jump_range & f2_ftr_range
   val f2_exception_vec = VecInit((0 until PredictWidth).map( i => MuxCase(ExceptionType.none, Seq(
@@ -424,6 +444,13 @@ class NewIFU(implicit p: Parameters) extends XSModule
   ))))
   val f2_perf_info    = io.icachePerfInfo
 
+  /**
+   * 切分函数cut
+   * predict Width如果在有C扩展的情况下就是16
+   * @param cacheline 缓存行
+   * @param cutPtr 一个数组，生成方式在f1流水级的末尾附近
+   * @return
+   */
   def cut(cacheline: UInt, cutPtr: Vec[UInt]) : Vec[UInt] ={
     require(HasCExtension)
     // if(HasCExtension){
@@ -443,6 +470,11 @@ class NewIFU(implicit p: Parameters) extends XSModule
     // }
   }
 
+  /**
+   * icache这边做了细粒度拆分，8个bank每次读5个，按地址低位放在一起。
+   * 所以实际上只需要把cacheline复制一份拼在一起，从中间截取就可以拿到数据。
+   * port0上回来的数据已经包含两个行了，在dataarray里面做了拼接，miss回来的在mainpipe里面做了拼接。
+   */
   val f2_cache_response_data = fromICache.map(_.bits.data)
   val f2_data_2_cacheline = Cat(f2_cache_response_data(0), f2_cache_response_data(0))
 
@@ -454,6 +486,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   // preDecoderRegInIn.csrTriggerEnable := io.csrTriggerEnable
   // preDecoderRegIn.pc  := f2_pc
 
+//  给预译码器送入数据
   val preDecoderIn  = preDecoder.io.in
   preDecoderIn.valid := f2_valid
   preDecoderIn.bits.data := f2_cut_data

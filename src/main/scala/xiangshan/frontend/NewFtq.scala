@@ -86,6 +86,8 @@ class Ftq_RF_Components(implicit p: Parameters) extends XSBundle with BPUUtils {
   val isNextMask = Vec(PredictWidth, Bool())
   val fallThruError = Bool()
   // val carry = Bool()
+
+  //计算PC
   def getPc(offset: UInt) = {
     def getHigher(pc: UInt) = pc(VAddrBits-1, log2Ceil(PredictWidth)+instOffsetBits+1)
     def getOffset(pc: UInt) = pc(log2Ceil(PredictWidth)+instOffsetBits, instOffsetBits)

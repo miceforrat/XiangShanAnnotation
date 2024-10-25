@@ -43,7 +43,8 @@ trait HasL1CacheParameters extends HasXSParameter
   def refillBytes = l1BusDataWidth / 8
   def blockBits = blockBytes * 8
 
-  def idxBits = log2Up(cacheParams.nSets)
+  def idxBits = log2Up(cacheParams.nSets
+  )
   def wayBits = log2Up(nWays)
   def blockOffBits = log2Up(cacheParams.blockBytes)
   def refillOffBits = log2Up(l1BusDataWidth / 8)
