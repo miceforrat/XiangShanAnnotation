@@ -100,12 +100,12 @@ class IfuToPreDecode(implicit p: Parameters) extends XSBundle {
 
 
 class IfuToPredChecker(implicit p: Parameters) extends XSBundle {
-  val ftqOffset     = Valid(UInt(log2Ceil(PredictWidth).W))
-  val jumpOffset    = Vec(PredictWidth, UInt(XLEN.W))
-  val target        = UInt(VAddrBits.W)
-  val instrRange    = Vec(PredictWidth, Bool())
+  val ftqOffset     = Valid(UInt(log2Ceil(PredictWidth).W)) //  fromFtq.req.bits.ftqOffset
+  val jumpOffset    = Vec(PredictWidth, UInt(XLEN.W)) //PredDecoder 计算的 jumpOffset
+  val target        = UInt(VAddrBits.W) // fromFtq.req.bits.nextStartAddr
+  val instrRange    = Vec(PredictWidth, Bool()) //  f2_jump_range & f2_ftr_range
   val instrValid    = Vec(PredictWidth, Bool())
-  val pds           = Vec(PredictWidth, new PreDecodeInfo)
+  val pds           = Vec(PredictWidth, new PreDecodeInfo) //每个指令的控制信息
   val pc            = Vec(PredictWidth, UInt(VAddrBits.W))
   val fire_in       = Bool()
 }
@@ -265,6 +265,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   val f3_wb_not_flush = WireInit(false.B)
 
   backend_redirect := fromFtq.redirect.valid
+//  在这里定义冲刷
   f3_flush := backend_redirect || (wb_redirect && !f3_wb_not_flush)
   f2_flush := backend_redirect || mmio_redirect || wb_redirect
   f1_flush := f2_flush || from_bpu_f1_flush
@@ -312,6 +313,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
 
   f1_ready := f1_fire || !f1_valid
 
+//  来自BPU的冲刷请求
   from_bpu_f1_flush := fromFtq.flushFromBpu.shouldFlushByStage3(f1_ftq_req.ftqIdx) && f1_valid
   // from_bpu_f1_flush := false.B
 
@@ -495,6 +497,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   val preDecoderOut = preDecoder.io.out
 
   //val f2_expd_instr     = preDecoderOut.expInstr
+//  这一步得到拼接过后的指令
   val f2_instr          = preDecoderOut.instr
   val f2_pd             = preDecoderOut.pd
   val f2_jump_offset    = preDecoderOut.jumpOffset
@@ -524,6 +527,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
     ******************************************************************************
     */
 
+//    进行16位指令扩展
   val expanders = Seq.fill(PredictWidth)(Module(new RVCExpander))
 
   val f3_valid          = RegInit(false.B)
@@ -839,7 +843,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
     f3_lastHalf.valid := f3_hasLastHalf && !f3_lastHalf_disable
     f3_lastHalf.middlePC := f3_ftq_req.nextStartAddr
   }
-
+//在这里选择第一条是否是有效指令的开始或者后半部分
   f3_instr_valid := Mux(f3_lastHalf.valid,f3_hasHalfValid ,VecInit(f3_pd.map(inst => inst.valid)))
 
   /*** frontend Trigger  ***/
@@ -1012,6 +1016,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
     f3_lastHalf.valid := false.B
   }
 
+//  写回指令信息和误预测信息
   val checkFlushWb = Wire(Valid(new PredecodeWritebackBundle))
   val checkFlushWbjalTargetIdx = ParallelPriorityEncoder(VecInit(wb_pd.zip(wb_instr_valid).map{case (pd, v) => v && pd.isJal }))
   val checkFlushWbTargetIdx = ParallelPriorityEncoder(wb_check_result_stage2.fixedMissPred)
@@ -1031,7 +1036,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
 
   toFtq.pdWb := Mux(wb_valid, checkFlushWb,  mmioFlushWb)
 
-  wb_redirect := checkFlushWb.bits.misOffset.valid && wb_valid
+  wb_redirect := checkFlushWb.bits.misOffset.valid && wb_valid //根据PredChecker的错误信息决定冲刷
 
   /*write back flush type*/
   val checkFaultType = wb_check_result_stage2.faultType

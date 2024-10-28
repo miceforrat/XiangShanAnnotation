@@ -191,6 +191,7 @@ class BpuFlushInfo(implicit p: Parameters) extends XSBundle with HasCircularQueu
   // a packet from bpu s3 can reach f1 at most
   val s2 = Valid(new FtqPtr)
   val s3 = Valid(new FtqPtr)
+//  只有冲刷的指针在取指令的指针之前才进行冲刷
   def shouldFlushBy(src: Valid[FtqPtr], idx_to_flush: FtqPtr) = {
     src.valid && !isAfter(src.bits, idx_to_flush)
   }

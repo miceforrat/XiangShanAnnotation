@@ -34,8 +34,8 @@ trait HasPdConst extends HasXSParameter with HasICacheParameters with HasIFUCons
   def isLink(reg:UInt) = reg === 1.U || reg === 5.U
   def brInfo(instr: UInt) = {
     val brType::Nil = ListLookup(instr, List(BrType.notCFI), PreDecodeInst.brTable)
-    val rd = Mux(isRVC(instr), instr(12), instr(11,7))
-    val rs = Mux(isRVC(instr), Mux(brType === BrType.jal, 0.U, instr(11, 7)), instr(19, 15))
+    val rd = Mux(isRVC(instr), instr(12), instr(11,7)) //destination register
+    val rs = Mux(isRVC(instr), Mux(brType === BrType.jal, 0.U, instr(11, 7)), instr(19, 15)) // source register
     val isCall = (brType === BrType.jal && !isRVC(instr) || brType === BrType.jalr) && isLink(rd) // Only for RV64
     val isRet = brType === BrType.jalr && isLink(rs) && !isCall
     List(brType, isCall, isRet)
@@ -56,6 +56,7 @@ trait HasPdConst extends HasXSParameter with HasICacheParameters with HasIFUCons
   def NOP = "h4501".U(16.W)
 }
 
+//指令类型
 object BrType {
   def notCFI   = "b00".U
   def branch  = "b01".U
@@ -64,6 +65,7 @@ object BrType {
   def apply() = UInt(2.W)
 }
 
+//异常类型
 object ExcType {  //TODO:add exctype
   def notExc = "b000".U
   def apply() = UInt(3.W)
@@ -98,6 +100,7 @@ class PreDecode(implicit p: Parameters) extends XSModule with HasPdConst{
     val out = Output(new PreDecodeResp)
   })
 
+//  f2_cut_data
   val data          = io.in.bits.data
 //  val lastHalfMatch = io.in.lastHalfMatch
   val validStart, validEnd = Wire(Vec(PredictWidth, Bool()))
@@ -124,9 +127,11 @@ class PreDecode(implicit p: Parameters) extends XSModule with HasPdConst{
   h_validStart_halfPlus1.map(_ := false.B)
   h_validEnd_halfPlus1.map(_ := false.B)
 
+//  预译码器产生接受来自IFU完成指令切分的17 × 2字节的初始指令码，并以4字节为窗口，2字节为步进长度，从第1个2字节开始，直到第16个2字节，选出总共16个4字节的指令码。
   val rawInsts = if (HasCExtension) VecInit((0 until PredictWidth).map(i => Cat(data(i+1), data(i))))
   else         VecInit((0 until PredictWidth).map(i => data(i)))
 
+  //产生预译码信息
   for (i <- 0 until PredictWidth) {
     val inst           = WireInit(rawInsts(i))
     //val expander       = Module(new RVCExpander)
@@ -134,6 +139,7 @@ class PreDecode(implicit p: Parameters) extends XSModule with HasPdConst{
     val currentPC      = io.in.bits.pc(i)
     //expander.io.in             := inst
 
+//    通过brInfo提取指令信息
     val brType::isCall::isRet::Nil = brInfo(inst)
     val jalOffset = jal_offset(inst, currentIsRVC(i))
     val brOffset  = br_offset(inst, currentIsRVC(i))
@@ -156,6 +162,12 @@ class PreDecode(implicit p: Parameters) extends XSModule with HasPdConst{
     io.out.jumpOffset(i)       := Mux(io.out.pd(i).isBr, brOffset, jalOffset)
   }
 
+  /**
+   * 正常模式+非正常模式
+   * 存在内部时序优化，虽然求出有效指令的起始向量的方法是串行的，但是时间消耗会过大
+   * 所以拆成前后两个部分，前半部分只需要在一个循环中完成分类讨论正常与否即可，后半部分需要拆成两个循环，根据一半处的指令是否是起始指令来进行讨论
+   * diff没有功能作用，仅作为提前模测使用，不会流片
+   */
   // the first half is always reliable
   for (i <- 0 until PredictWidth / 2) {
     val lastIsValidEnd =   if (i == 0) { true.B } else { validEnd(i-1) || !HasCExtension.B }
@@ -317,7 +329,7 @@ class PredCheckerResp(implicit p: Parameters) extends XSBundle with HasPdConst {
   val stage1Out = new Bundle{
     val fixedRange  = Vec(PredictWidth, Bool())
     val fixedTaken  = Vec(PredictWidth, Bool())
-  }
+  } //重新计算的距离和取用的指令
   //to Ftq write back port (stage 2)
   val stage2Out = new Bundle{
     val fixedTarget = Vec(PredictWidth, UInt(VAddrBits.W))
@@ -336,30 +348,30 @@ class PredChecker(implicit p: Parameters) extends XSModule with HasPdConst {
 
   val (takenIdx, predTaken)     = (io.in.ftqOffset.bits, io.in.ftqOffset.valid)
   val predTarget                = (io.in.target)
-  val (instrRange, instrValid)  = (io.in.instrRange, io.in.instrValid)
-  val (pds, pc, jumpOffset)     = (io.in.pds, io.in.pc, io.in.jumpOffset)
+  val (instrRange, instrValid)  = (io.in.instrRange, io.in.instrValid) // 指令范围，常规+第一条跳转
+  val (pds, pc, jumpOffset)     = (io.in.pds, io.in.pc, io.in.jumpOffset) //所有指令的预译码信息、PC，跳转范围
 
   val jalFaultVec, retFaultVec, targetFault, notCFITaken, invalidTaken = Wire(Vec(PredictWidth, Bool()))
 
   /** remask fault may appear together with other faults, but other faults are exclusive
-    * so other f ault mast use fixed mask to keep only one fault would be found and redirect to Ftq
-    * we first detecct remask fault and then use fixedRange to do second check
+    * so other fault must use fixed mask to keep only one fault would be found and redirect to Ftq
+    * we first detect remask fault and then use fixedRange to do second check
     **/
 
   //Stage 1: detect remask fault
   /** first check: remask Fault */
-  jalFaultVec         := VecInit(pds.zipWithIndex.map{case(pd, i) => pd.isJal && instrRange(i) && instrValid(i) && (takenIdx > i.U && predTaken || !predTaken) })
+  jalFaultVec         := VecInit(pds.zipWithIndex.map{case(pd, i) => pd.isJal && instrRange(i) && instrValid(i) && (takenIdx > i.U && predTaken || !predTaken) }) //是有效跳转指令，但是预测块给出的第一条跳转指令在其后，或者没有预测跳转
   retFaultVec         := VecInit(pds.zipWithIndex.map{case(pd, i) => pd.isRet && instrRange(i) && instrValid(i) && (takenIdx > i.U && predTaken || !predTaken) })
   val remaskFault      = VecInit((0 until PredictWidth).map(i => jalFaultVec(i) || retFaultVec(i)))
   val remaskIdx        = ParallelPriorityEncoder(remaskFault.asUInt)
   val needRemask       = ParallelOR(remaskFault)
-  val fixedRange       = instrRange.asUInt & (Fill(PredictWidth, !needRemask) | Fill(PredictWidth, 1.U(1.W)) >> ~remaskIdx)
+  val fixedRange       = instrRange.asUInt & (Fill(PredictWidth, !needRemask) | Fill(PredictWidth, 1.U(1.W)) >> ~remaskIdx) // 重新计算距离
 
   io.out.stage1Out.fixedRange := fixedRange.asTypeOf((Vec(PredictWidth, Bool())))
 
   io.out.stage1Out.fixedTaken := VecInit(pds.zipWithIndex.map{case(pd, i) => instrValid (i) && fixedRange(i) && (pd.isRet || pd.isJal || takenIdx === i.U && predTaken && !pd.notCFI)  })
 
-  /** second check: faulse prediction fault and target fault */
+  /** second check: false prediction fault and target fault */
   notCFITaken  := VecInit(pds.zipWithIndex.map{case(pd, i) => fixedRange(i) && instrValid(i) && i.U === takenIdx && pd.notCFI && predTaken })
   invalidTaken := VecInit(pds.zipWithIndex.map{case(pd, i) => fixedRange(i) && !instrValid(i)  && i.U === takenIdx  && predTaken })
 
@@ -396,6 +408,7 @@ class PredChecker(implicit p: Parameters) extends XSModule with HasPdConst {
 
 }
 
+//硬件断点
 class FrontendTrigger(implicit p: Parameters) extends XSModule with SdtrigExt {
   val io = IO(new Bundle(){
     val frontendTrigger = Input(new FrontendTdataDistributeIO)
