@@ -151,7 +151,7 @@ class FrontendInlinedImp (outer: FrontendInlined) extends LazyModuleImp(outer)
   //IFU-ICache
 
   icache.io.fetch.req <> ftq.io.toICache.req
-  ftq.io.toICache.req.ready :=  ifu.io.ftqInter.fromFtq.req.ready && icache.io.fetch.req.ready
+  ftq.io.toICache.req.ready :=  ifu.io.ftqInter.fromFtq.req.ready && icache.io.fetch.req.ready // 联动IFU中设置fromFtq
 
   ifu.io.icacheInter.resp <>    icache.io.fetch.resp
   ifu.io.icacheInter.icacheReady :=  icache.io.toIFU

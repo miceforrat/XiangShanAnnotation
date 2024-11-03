@@ -273,7 +273,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
 
   val f1_ready, f2_ready, f3_ready         = WireInit(false.B)
 
-  fromFtq.req.ready := f1_ready && io.icacheInter.icacheReady
+  fromFtq.req.ready := f1_ready && io.icacheInter.icacheReady //这个东西和icache会联动，参见frontend
 
 
   when (wb_redirect) {
@@ -619,7 +619,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   val mmio_is_RVC           = RegInit(false.B)
   val mmio_resend_addr      = RegInit(0.U(PAddrBits.W))
   val mmio_resend_exception = RegInit(0.U(ExceptionType.width.W))
-  val mmio_resend_gpaddr    = RegInit(0.U(GPAddrBits.W))
+  val mmio_resend_gpaddr    = RegInit(0.U(GPAddrBits.W)) //gpaddr: 客户页地址
   val mmio_resend_isForVSnonLeafPTE    = RegInit(false.B)
 
   //last instuction finish
@@ -696,7 +696,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
     is(m_waitResp){
       when(fromUncache.fire){
           val isRVC = fromUncache.bits.data(1,0) =/= 3.U
-          val needResend = !isRVC && f3_paddrs(0)(2,1) === 3.U
+          val needResend = !isRVC && f3_paddrs(0)(2,1) === 3.U //?64位不够用，需要继续请求重发
           mmio_state      := Mux(needResend, m_sendTLB, m_waitCommit)
           mmio_is_RVC     := isRVC
           f3_mmio_data(0) := fromUncache.bits.data(15,0)
@@ -713,7 +713,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
         // we are using a blocked tlb, so resp.fire must have !resp.bits.miss
         assert(!io.iTLBInter.resp.bits.miss, "blocked mode iTLB miss when resp.fire")
         val tlb_exception = ExceptionType.fromTlbResp(io.iTLBInter.resp.bits)
-        // if tlb has exception, abort checking pmp, just send instr & exception to ibuffer and wait for commit
+        // if tlb has exception, abort checking pmp(物理内存保护), just send instr & exception to ibuffer and wait for commit
         mmio_state := Mux(tlb_exception === ExceptionType.none, m_sendPMP, m_waitCommit)
         // also save itlb response
         mmio_resend_addr      := io.iTLBInter.resp.bits.paddr(0)
@@ -725,6 +725,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
 
     is(m_sendPMP){
       // if pmp re-check does not respond mmio, must be access fault
+      // 否则根据物理内存保护决定异常
       val pmp_exception = Mux(io.pmp.resp.mmio, ExceptionType.fromPMPResp(io.pmp.resp), ExceptionType.af)
       // if pmp has exception, abort sending request, just send instr & exception to ibuffer and wait for commit
       mmio_state := Mux(pmp_exception === ExceptionType.none, m_resendReq, m_waitCommit)
@@ -818,7 +819,6 @@ class NewIFU(implicit p: Parameters) extends XSModule
   checkerIn.fire_in     := RegNext(f2_fire, init = false.B)
 
   /*** handle half RVI in the last 2 Bytes  ***/
-
   def hasLastHalf(idx: UInt) = {
     //!f3_pd(idx).isRVC && checkerOutStage1.fixedRange(idx) && f3_instr_valid(idx) && !checkerOutStage1.fixedTaken(idx) && !checkerOutStage2.fixedMissPred(idx) && ! f3_req_is_mmio
     !f3_pd(idx).isRVC && checkerOutStage1.fixedRange(idx) && f3_instr_valid(idx) && !checkerOutStage1.fixedTaken(idx) && ! f3_req_is_mmio
@@ -859,14 +859,17 @@ class NewIFU(implicit p: Parameters) extends XSModule
   /*** send to Ibuffer  ***/
   io.toIbuffer.valid            := f3_toIbuffer_valid
   io.toIbuffer.bits.instrs      := f3_expd_instr
-  io.toIbuffer.bits.valid       := f3_instr_valid.asUInt
-  io.toIbuffer.bits.enqEnable   := checkerOutStage1.fixedRange.asUInt & f3_instr_valid.asUInt
-  io.toIbuffer.bits.pd          := f3_pd
-  io.toIbuffer.bits.ftqPtr      := f3_ftq_req.ftqIdx
+  io.toIbuffer.bits.valid       := f3_instr_valid.asUInt //标识预测块中有效的指令，1表示指令开始，0表示指令中间
+  io.toIbuffer.bits.enqEnable   := checkerOutStage1.fixedRange.asUInt & f3_instr_valid.asUInt //为1表示这个2字节指令码是一条指令的开始且在预测块表示的指令范围内
+  io.toIbuffer.bits.pd          := f3_pd //控制信息
+  io.toIbuffer.bits.ftqPtr      := f3_ftq_req.ftqIdx //ftq队列中的指针位置
   io.toIbuffer.bits.pc          := f3_pc
   // Find last using PriorityMux
   io.toIbuffer.bits.isLastInFtqEntry := Reverse(PriorityEncoderOH(Reverse(io.toIbuffer.bits.enqEnable))).asBools
-  io.toIbuffer.bits.ftqOffset.zipWithIndex.map{case(a, i) => a.bits := i.U; a.valid := checkerOutStage1.fixedTaken(i) && !f3_req_is_mmio}
+  io.toIbuffer.bits.ftqOffset.zipWithIndex.map{case(a, i) =>
+    a.bits := i.U;
+    a.valid := checkerOutStage1.fixedTaken(i) && !f3_req_is_mmio
+  }
   io.toIbuffer.bits.foldpc      := f3_foldpc
   io.toIbuffer.bits.exceptionType := ExceptionType.merge(f3_exception_vec, f3_crossPage_exception_vec)
   // exceptionFromBackend only needs to be set for the first instruction.
@@ -886,7 +889,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   }
 
   /** to backend */
-  // f3_gpaddr is valid iff gpf is detected
+  // f3_gpaddr is valid iff gpf(guest page fault) is detected
   io.toBackend.gpaddrMem_wen   := f3_toIbuffer_valid && Mux(
     f3_req_is_mmio,
     mmio_resend_exception === ExceptionType.gpf,
